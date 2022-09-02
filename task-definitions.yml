@@ -1,0 +1,101 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  ECS tasks with log forwarder to grafana/loki
+Parameters:
+  LogRouterImage:
+    Description: The log router docker image to send logs to Loki
+    Type: String
+    Default: grafana/loki-docker-driver:main-a98b7eb
+  ContainerImage:
+    Description: The app container image
+    Type: String
+    Default: alpine:3.13
+
+Resources:
+  ECSServiceRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+              - ecs.amazonaws.com
+              - ecs-tasks.amazonaws.com
+          Action:
+            - "sts:AssumeRole"
+      Path: /
+      Policies:
+        - PolicyName: ecs-service
+          PolicyDocument:
+            Statement:
+            - Effect: Allow
+              Action:
+                - "elasticloadbalancing:DeregisterInstancesFromLoadBalancer"
+                - "elasticloadbalancing:DeregisterTargets"
+                - "elasticloadbalancing:Describe*"
+                - "elasticloadbalancing:RegisterInstancesWithLoadBalancer"
+                - "elasticloadbalancing:RegisterTargets"
+                - "ec2:Describe*"
+                - "ec2:AuthorizeSecurityGroupIngress"
+                - "ecr:GetAuthorizationToken"
+                - "ecr:BatchCheckLayerAvailability"
+                - "ecr:GetDownloadUrlForLayer"
+                - "ecr:BatchGetImage"
+                - "logs:CreateLogStream"
+                - "logs:PutLogEvents"
+                - "ecs:ExecuteCommand"
+                - "ssmmessages:CreateControlChannel"
+                - "ssmmessages:CreateDataChannel"
+                - "ssmmessages:OpenControlChannel"
+                - "ssmmessages:OpenDataChannel"
+              Resource: "*"
+
+  AppTaskdefinition:
+    Type: "AWS::ECS::TaskDefinition"
+    Properties:
+      Family: grafana
+      RequiresCompatibilities:
+        - FARGATE
+      NetworkMode: awsvpc
+      ExecutionRoleArn: !Ref ECSServiceRole
+      Cpu: 0.25vCPU
+      Memory: 1024
+      ContainerDefinitions:
+        - Name: log_router
+          Essential: true
+          Image: !Ref LogRouterImage
+          FirelensConfiguration:
+            Type: "fluentbit"
+            Options:
+              "enable-ecs-log-metadata": true
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: "firelens-container"
+              awslogs-region: !Ref "AWS::Region"
+              awslogs-create-group: true
+              awslogs-stream-prefix: "firelens"
+          MemoryReservation: 50
+          PortMappings:
+            - ContainerPort: 3000
+        - Name: App
+          Essential: true
+          Image: !Ref ContainerImage
+          EntryPoint: ["sh", "-c"]
+          Command:
+            ['/bin/sh -c "while true; do sleep 15 ;echo hello_world; done"']
+          LogConfiguration:
+            LogDriver: "awsfirelens"
+            Options:
+              Name: "App"
+              Url: "https://<userid>:<grafancloud apikey>@<grafanacloud host>/loki/api/v1/push"
+              Labels: '{job="firelens"}'
+              RemoveKeys: "container_id,ecs_task_arn"
+              LabelKeys: "container_name,ecs_task_definition,source,ecs_cluster"
+              LineFormat: "key_value"
+      Tags:
+        - Key: Service
+          Value: app_sample
+        - Key: Version
+          Value: 1.0.0
