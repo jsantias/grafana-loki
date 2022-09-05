@@ -5,11 +5,33 @@ Parameters:
   LogRouterImage:
     Description: The log router docker image to send logs to Loki
     Type: String
-    Default: grafana/loki-docker-driver:main-a98b7eb
+    Default: grafana/fluent-bit-plugin-loki:main-e39ea21-amd64
   ContainerImage:
     Description: The app container image
     Type: String
     Default: alpine:3.13
+  EnvironmentName:
+    Type: String
+    Description: The environment where this is deployed to
+    AllowedValues: [Testing, Production]
+  ClientName:
+    Type: String
+    Description: The name of the client
+  MinimumContainers:
+    Type: Number
+    Description: The minimum number of containers used in the ECS Service
+    Default: 1
+  Subnets:
+    Type: CommaDelimitedList
+    Description: The subnets to place the ECS tasks in 
+  LokiEndpoint:
+    Type: String
+    Description: The URL of the loki LokiEndpoint
+
+Conditions:
+  IsProduction: !Equals
+    - !Ref EnvironmentName
+    - 'Production'
 
 Resources:
   ECSServiceRole:
@@ -44,6 +66,7 @@ Resources:
                 - "ecr:BatchGetImage"
                 - "logs:CreateLogStream"
                 - "logs:PutLogEvents"
+                - "logs:CreateLogGroup"
                 - "ecs:ExecuteCommand"
                 - "ssmmessages:CreateControlChannel"
                 - "ssmmessages:CreateDataChannel"
@@ -51,10 +74,45 @@ Resources:
                 - "ssmmessages:OpenDataChannel"
               Resource: "*"
 
-  AppTaskdefinition:
+  ECSCluster:
+    Type: 'AWS::ECS::Cluster'
+    Properties:
+      ClusterName: !Sub '${ClientName}-${EnvironmentName}-cluster'
+      ClusterSettings: 
+        - Name: containerInsights
+          Value: enabled
+      Tags:
+        - Key: EnvironmentName 
+          Value: !Ref EnvironmentName
+        - Key: ClientName
+          Value: !Ref ClientName
+          
+  ECSService:
+    Type: 'AWS::ECS::Service'
+    Properties:
+      CapacityProviderStrategy: 
+        - !If 
+          - IsProduction
+          - {CapacityProvider: 'FARGATE', Weight: 1}
+          - {CapacityProvider: 'FARGATE_SPOT', Weight: 1}
+      EnableExecuteCommand: false
+      Cluster: !Ref ECSCluster
+      DesiredCount: !Ref MinimumContainers
+      TaskDefinition: !Ref ECSTaskdefinition
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED 
+          Subnets: !Ref Subnets
+      Tags:
+        - Key: EnvironmentName 
+          Value: !Ref EnvironmentName
+        - Key: ClientName
+          Value: !Ref ClientName
+
+  ECSTaskdefinition:
     Type: "AWS::ECS::TaskDefinition"
     Properties:
-      Family: grafana
+      Family: loki
       RequiresCompatibilities:
         - FARGATE
       NetworkMode: awsvpc
@@ -88,14 +146,14 @@ Resources:
           LogConfiguration:
             LogDriver: "awsfirelens"
             Options:
-              Name: "App"
-              Url: "https://<userid>:<grafancloud apikey>@<grafanacloud host>/loki/api/v1/push"
+              Name: "grafana-loki"
+              Url: !Sub "${LokiEndpoint}/loki/api/v1/push"
               Labels: '{job="firelens"}'
               RemoveKeys: "container_id,ecs_task_arn"
               LabelKeys: "container_name,ecs_task_definition,source,ecs_cluster"
               LineFormat: "key_value"
       Tags:
-        - Key: Service
-          Value: app_sample
-        - Key: Version
-          Value: 1.0.0
+        - Key: EnvironmentName 
+          Value: !Ref EnvironmentName
+        - Key: ClientName
+          Value: !Ref ClientName

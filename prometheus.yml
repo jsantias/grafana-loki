@@ -1,0 +1,23 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Parameters:
+  PrometheusWSName:
+    Type: String 
+    Description: The Prometheus workspace name
+  EnvironmentName:
+    Type: String
+    Description: The environment where this is deployed to
+  ClientName:
+    Type: String
+    Description: The name of the client
+
+Resources:
+  APSWorkspace:
+    Type: AWS::APS::Workspace
+    Properties:
+      Alias: !Ref PrometheusWSName
+      Tags:
+        - Key: EnvironmentName 
+          Value: !Ref EnvironmentName
+        - Key: ClientName
+          Value: !Ref ClientName
