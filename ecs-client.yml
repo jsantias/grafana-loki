@@ -1,6 +1,15 @@
+#====================================================================================================
+# Description : Ships logs to grafana loki
+# Author      : John Santias
+# Date        : 06-08-2022
+# Version     : 0.1.0
+#====================================================================================================
 AWSTemplateFormatVersion: 2010-09-09
 Description: >-
-  ECS tasks with log forwarder to grafana/loki
+  Ships logs to grafana loki
+#====================================================================================================
+#                                          Parameters
+#====================================================================================================
 Parameters:
   LogRouterImage:
     Description: The log router docker image to send logs to Loki
@@ -28,12 +37,22 @@ Parameters:
     Type: String
     Description: The URL of the loki LokiEndpoint
 
+#====================================================================================================
+#                                          Condition
+#====================================================================================================
 Conditions:
   IsProduction: !Equals
     - !Ref EnvironmentName
     - 'Production'
 
+#====================================================================================================
+#                                          Resources
+#====================================================================================================
 Resources:
+
+#====================================================================================================
+#                                             ECS
+#====================================================================================================
   ECSServiceRole:
     Type: "AWS::IAM::Role"
     Properties:
@@ -112,7 +131,7 @@ Resources:
   ECSTaskdefinition:
     Type: "AWS::ECS::TaskDefinition"
     Properties:
-      Family: loki
+      Family: 'loki-client'
       RequiresCompatibilities:
         - FARGATE
       NetworkMode: awsvpc
@@ -157,3 +176,7 @@ Resources:
           Value: !Ref EnvironmentName
         - Key: ClientName
           Value: !Ref ClientName
+
+#====================================================================================================
+#                                             Outputs
+#====================================================================================================

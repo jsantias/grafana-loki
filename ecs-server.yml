@@ -1,0 +1,333 @@
+#====================================================================================================
+# Description : Creates a grafana loki server
+# Author      : John Santias
+# Date        : 06-08-2022
+# Version     : 0.1.0
+#====================================================================================================
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  Creates a grafana loki server
+#====================================================================================================
+#                                          Parameters
+#====================================================================================================
+Parameters:
+  AppName: 
+    Type: String
+    Description: 'The name of the application'
+    Default: loki
+  ContainerImage:
+    Description: The loki server
+    Type: String
+    Default: grafana/loki:main-93a5a71-arm64
+  EnvironmentName:
+    Type: String
+    Description: The environment where this is deployed to
+    AllowedValues: [testing, production]
+  ClientName:
+    Type: String
+    Description: The name of the client
+  MinimumContainers:
+    Type: Number
+    Description: The minimum number of containers used in the ECS Service
+    Default: 1
+  VpcId:
+    Type: String
+    Description: The VPC ID to deploy the resources in to
+  SubnetA:
+    Type: String
+    Description: The subnet in availability zone A to place the ECS tasks in
+  SubnetB:
+    Type: String
+    Description: The subnet in availability zone B to place the ECS tasks in
+
+#====================================================================================================
+#                                          Condition
+#====================================================================================================
+Conditions:
+  IsProduction: !Equals
+    - !Ref EnvironmentName
+    - 'production'
+
+#====================================================================================================
+#                                          Resources
+#====================================================================================================
+Resources:
+#====================================================================================================
+#                                             ECS
+#====================================================================================================
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: ecs-service
+          PolicyDocument:
+            Statement:
+            - Effect: Allow
+              Action:
+                - "elasticloadbalancing:DeregisterInstancesFromLoadBalancer"
+                - "elasticloadbalancing:DeregisterTargets"
+                - "elasticloadbalancing:Describe*"
+                - "elasticloadbalancing:RegisterInstancesWithLoadBalancer"
+                - "elasticloadbalancing:RegisterTargets"
+                - "ec2:Describe*"
+                - "ec2:AuthorizeSecurityGroupIngress"
+                - "ecr:GetAuthorizationToken"
+                - "ecr:BatchCheckLayerAvailability"
+                - "ecr:GetDownloadUrlForLayer"
+                - "ecr:BatchGetImage"
+                - "logs:CreateLogStream"
+                - "logs:PutLogEvents"
+                - "logs:CreateLogGroup"
+                - "ecs:ExecuteCommand"
+                - "ssmmessages:CreateControlChannel"
+                - "ssmmessages:CreateDataChannel"
+                - "ssmmessages:OpenControlChannel"
+                - "ssmmessages:OpenDataChannel"
+              Resource: "*"
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy'
+  
+  ECSTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      # RoleName: !Join ['-',[!Ref ECSCluster, TaskRole,!Ref AWS::Region]]
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: 
+                - ecs-tasks.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: EFSAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: 
+                 - elasticfilesystem:ClientMount
+                 - elasticfilesystem:ClientRootAccess                 
+                 - elasticfilesystem:ClientWrite
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    'aws:TagKeys/Name': !Ref ECSCluster
+
+  ECSCluster:
+    Type: 'AWS::ECS::Cluster'
+    Properties:
+      ClusterName: !Sub '${ClientName}-${EnvironmentName}-cluster'
+      ClusterSettings: 
+        - Name: containerInsights
+          Value: enabled
+      Tags:
+        - Key: Service 
+          Value: ECS-Cluster
+        - Key: EnvironmentName 
+          Value: !Ref EnvironmentName
+        - Key: ClientName
+          Value: !Ref ClientName
+
+  ECSService:
+    Type: 'AWS::ECS::Service'
+    Properties:
+      CapacityProviderStrategy: 
+        - !If 
+          - IsProduction
+          - {CapacityProvider: 'FARGATE', Weight: 1}
+          - {CapacityProvider: 'FARGATE_SPOT', Weight: 1}
+      EnableExecuteCommand: true
+      Cluster: !Ref ECSCluster
+      DesiredCount: !Ref MinimumContainers
+      TaskDefinition: !Ref ECSTaskdefinition
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          SecurityGroups:
+            - !Ref ECSSecurityGroup
+          Subnets: !Split [',', !Sub '${SubnetA},${SubnetB}' ]
+      Tags:
+        - Key: Service 
+          Value: ECS-Service
+        - Key: EnvironmentName 
+          Value: !Ref EnvironmentName
+        - Key: ClientName
+          Value: !Ref ClientName
+
+  ECSTaskdefinition:
+    Type: "AWS::ECS::TaskDefinition"
+    DependsOn: 
+      - MountTargetA
+      - MountTargetB
+    Properties:
+      Family: !Sub '${AppName}-server'
+      RequiresCompatibilities:
+        - FARGATE
+      NetworkMode: awsvpc
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      TaskRoleArn: !GetAtt ECSTaskRole.Arn
+      Cpu: 512
+      Memory: 1024
+      ContainerDefinitions:
+      - Name: !Sub '${AppName}-server'
+        Essential: true
+        Image: !Ref ContainerImage
+        LogConfiguration:
+          LogDriver: awslogs
+          Options:
+            awslogs-group: !Ref 'CloudwatchLogsGroup'
+            awslogs-region: !Ref 'AWS::Region'
+            awslogs-stream-prefix: !Join
+              - '-'
+              - - !Ref ClientName
+                - !Ref EnvironmentName
+                - !Ref AppName
+        PortMappings:
+          - HostPort: 3100
+            ContainerPort: 3100
+            Protocol: tcp
+        MountPoints:
+          - SourceVolume: "config"
+            ContainerPath: "/etc/loki/"
+      RuntimePlatform:
+          CpuArchitecture: ARM64
+          OperatingSystemFamily: LINUX
+      Volumes:
+        - Name: "config"
+          EFSVolumeConfiguration:
+            FilesystemId: !Ref FileSystem
+            RootDirectory: "/"
+            TransitEncryption: ENABLED
+            AuthorizationConfig:
+              IAM: ENABLED
+              AccessPointId: !Ref AccessPointConfig
+      Tags:
+        - Key: Service 
+          Value: ECS-Task-Definition
+        - Key: EnvironmentName 
+          Value: !Ref EnvironmentName
+        - Key: ClientName
+          Value: !Ref ClientName
+  
+  ECSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ECS Security Group
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80      
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Service
+          Value: SecurityGroup
+        - Key: EnvironmentName 
+          Value: !Ref EnvironmentName
+        - Key: ClientName
+          Value: !Ref ClientName
+
+#====================================================================================================
+#                                             EFS
+#====================================================================================================
+
+  FileSystem:
+    Type: 'AWS::EFS::FileSystem'
+    Properties:
+      Encrypted: true
+      BackupPolicy:
+        Status: DISABLED
+      PerformanceMode: generalPurpose
+      FileSystemPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Action:
+              - elasticfilesystem:ClientMount
+              - elasticfilesystem:ClientRootAccess
+              - elasticfilesystem:ClientWrite
+            Principal:
+                AWS: !GetAtt ECSTaskRole.Arn
+      FileSystemTags:
+        - Key: Service 
+          Value: EFS-Filesystem
+        - Key: EnvironmentName 
+          Value: !Ref EnvironmentName
+        - Key: ClientName
+          Value: !Ref ClientName
+
+  MountTargetA:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref FileSystem
+      SubnetId: !Ref SubnetA
+      SecurityGroups:
+      - !Ref EFSSecurityGroup
+  
+  MountTargetB:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref FileSystem
+      SubnetId: !Ref SubnetB
+      SecurityGroups:
+      - !Ref EFSSecurityGroup
+  
+  AccessPointConfig:
+    Type: 'AWS::EFS::AccessPoint'
+    Properties:
+      AccessPointTags: 
+        - Key: "Name"
+          Value: "config"    
+      FileSystemId: !Ref FileSystem
+      PosixUser:
+        Uid: "0"
+        Gid: "0"
+      RootDirectory:
+        CreationInfo:
+          OwnerGid: "0"
+          OwnerUid: "0"
+          Permissions: "0755"
+        Path: "/config"
+  
+  EFSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ECS Security Group
+      VpcId: !Ref 'VpcId'
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 2049
+          ToPort: 2049      
+          SourceSecurityGroupId: !Ref ECSSecurityGroup
+      Tags:
+        - Key: Service
+          Value: SecurityGroup
+        - Key: EnvironmentName 
+          Value: !Ref EnvironmentName
+        - Key: ClientName
+          Value: !Ref ClientName
+  
+#====================================================================================================
+#                                             CloudWatch
+#====================================================================================================
+  CloudwatchLogsGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Join 
+        - '-'
+        - - ECSLogGroup
+          - !Ref ClientName
+          - !Ref EnvironmentName
+          - !Ref AppName
+      RetentionInDays: 7
+
+#====================================================================================================
+#                                             Outputs
+#====================================================================================================
+
