@@ -96,7 +96,7 @@ Resources:
   ECSCluster:
     Type: 'AWS::ECS::Cluster'
     Properties:
-      ClusterName: !Sub '${ClientName}-${EnvironmentName}-cluster'
+      ClusterName: !Sub '${EnvironmentName}-${ClientName}-cluster'
       ClusterSettings: 
         - Name: containerInsights
           Value: enabled

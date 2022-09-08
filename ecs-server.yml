@@ -41,14 +41,6 @@ Parameters:
     Description: The subnet in availability zone B to place the ECS tasks in
 
 #====================================================================================================
-#                                          Condition
-#====================================================================================================
-Conditions:
-  IsProduction: !Equals
-    - !Ref EnvironmentName
-    - 'production'
-
-#====================================================================================================
 #                                          Resources
 #====================================================================================================
 Resources:
@@ -64,39 +56,12 @@ Resources:
             Principal:
               Service: ecs-tasks.amazonaws.com
             Action: 'sts:AssumeRole'
-      Policies:
-        - PolicyName: ecs-service
-          PolicyDocument:
-            Statement:
-            - Effect: Allow
-              Action:
-                - "elasticloadbalancing:DeregisterInstancesFromLoadBalancer"
-                - "elasticloadbalancing:DeregisterTargets"
-                - "elasticloadbalancing:Describe*"
-                - "elasticloadbalancing:RegisterInstancesWithLoadBalancer"
-                - "elasticloadbalancing:RegisterTargets"
-                - "ec2:Describe*"
-                - "ec2:AuthorizeSecurityGroupIngress"
-                - "ecr:GetAuthorizationToken"
-                - "ecr:BatchCheckLayerAvailability"
-                - "ecr:GetDownloadUrlForLayer"
-                - "ecr:BatchGetImage"
-                - "logs:CreateLogStream"
-                - "logs:PutLogEvents"
-                - "logs:CreateLogGroup"
-                - "ecs:ExecuteCommand"
-                - "ssmmessages:CreateControlChannel"
-                - "ssmmessages:CreateDataChannel"
-                - "ssmmessages:OpenControlChannel"
-                - "ssmmessages:OpenDataChannel"
-              Resource: "*"
       ManagedPolicyArns:
         - 'arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy'
   
   ECSTaskRole:
     Type: AWS::IAM::Role
     Properties:
-      # RoleName: !Join ['-',[!Ref ECSCluster, TaskRole,!Ref AWS::Region]]
       AssumeRolePolicyDocument:
         Statement:
           - Effect: Allow
@@ -111,18 +76,29 @@ Resources:
             Statement:
               - Effect: Allow
                 Action: 
-                 - elasticfilesystem:ClientMount
-                 - elasticfilesystem:ClientRootAccess                 
-                 - elasticfilesystem:ClientWrite
+                  - elasticfilesystem:ClientMount
+                  - elasticfilesystem:ClientRootAccess                 
+                  - elasticfilesystem:ClientWrite
                 Resource: '*'
                 Condition:
                   StringEquals:
                     'aws:TagKeys/Name': !Ref ECSCluster
+        - PolicyName: SSMAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - "ssmmessages:CreateControlChannel"
+                  - "ssmmessages:CreateDataChannel"
+                  - "ssmmessages:OpenControlChannel"
+                  - "ssmmessages:OpenDataChannel"
+                Resource: '*'
 
   ECSCluster:
     Type: 'AWS::ECS::Cluster'
     Properties:
-      ClusterName: !Sub '${ClientName}-${EnvironmentName}-cluster'
+      ClusterName: !Sub '${EnvironmentName}-${ClientName}-cluster'
       ClusterSettings: 
         - Name: containerInsights
           Value: enabled
@@ -137,11 +113,7 @@ Resources:
   ECSService:
     Type: 'AWS::ECS::Service'
     Properties:
-      CapacityProviderStrategy: 
-        - !If 
-          - IsProduction
-          - {CapacityProvider: 'FARGATE', Weight: 1}
-          - {CapacityProvider: 'FARGATE_SPOT', Weight: 1}
+      LaunchType: FARGATE
       EnableExecuteCommand: true
       Cluster: !Ref ECSCluster
       DesiredCount: !Ref MinimumContainers
@@ -175,9 +147,32 @@ Resources:
       Cpu: 512
       Memory: 1024
       ContainerDefinitions:
+      - Name: "initcontainer"
+        EntryPoint:
+          - "sh"
+          - "-c"
+          - "cp -pnrR /etc/loki/* /mnt"
+        Essential: false
+        Image: !Ref ContainerImage
+        LogConfiguration:
+          LogDriver: awslogs
+          Options:
+            awslogs-region: !Ref AWS::Region
+            awslogs-group: !Ref 'CloudwatchLogsGroup'
+            awslogs-stream-prefix: !Join
+              - '-'
+              - - !Ref EnvironmentName
+                - !Ref ClientName
+                - !Ref AppName
+                - 'initcontainer'
+        MountPoints:
+          - ContainerPath: "/mnt"
+            SourceVolume: "config"
       - Name: !Sub '${AppName}-server'
         Essential: true
         Image: !Ref ContainerImage
+        LinuxParameters:
+          InitProcessEnabled: true
         LogConfiguration:
           LogDriver: awslogs
           Options:
@@ -185,9 +180,10 @@ Resources:
             awslogs-region: !Ref 'AWS::Region'
             awslogs-stream-prefix: !Join
               - '-'
-              - - !Ref ClientName
-                - !Ref EnvironmentName
+              - - !Ref EnvironmentName
+                - !Ref ClientName
                 - !Ref AppName
+                - 'server'
         PortMappings:
           - HostPort: 3100
             ContainerPort: 3100
@@ -222,8 +218,8 @@ Resources:
       VpcId: !Ref VpcId
       SecurityGroupIngress:
         - IpProtocol: tcp
-          FromPort: 80
-          ToPort: 80      
+          FromPort: 3100
+          ToPort: 3100      
           CidrIp: 0.0.0.0/0
       Tags:
         - Key: Service
@@ -236,9 +232,9 @@ Resources:
 #====================================================================================================
 #                                             EFS
 #====================================================================================================
-
   FileSystem:
     Type: 'AWS::EFS::FileSystem'
+    DeletionPolicy: Retain
     Properties:
       Encrypted: true
       BackupPolicy:
@@ -322,12 +318,16 @@ Resources:
       LogGroupName: !Join 
         - '-'
         - - ECSLogGroup
-          - !Ref ClientName
           - !Ref EnvironmentName
+          - !Ref ClientName
           - !Ref AppName
       RetentionInDays: 7
 
 #====================================================================================================
 #                                             Outputs
 #====================================================================================================
-
+Outputs:
+  CloudwatchLogGroup:
+    Export: 
+        Name: !Sub '${EnvironmentName}-${ClientName}-cloudwatch-log-group'
+    Value: !Ref CloudwatchLogsGroup
